@@ -1,22 +1,11 @@
-// Native Web Crypto API AES-GCM 256-bit End-to-End Encryption (E2EE)
+// Ultra-Fast Native Web Crypto API AES-GCM 256-bit End-to-End Encryption (E2EE)
 
 const getDerivedKey = async (secret) => {
   const enc = new TextEncoder();
-  const keyMaterial = await window.crypto.subtle.importKey(
+  const hash = await window.crypto.subtle.digest('SHA-256', enc.encode(secret));
+  return window.crypto.subtle.importKey(
     'raw',
-    enc.encode(secret),
-    { name: 'PBKDF2' },
-    false,
-    ['deriveKey']
-  );
-  return window.crypto.subtle.deriveKey(
-    {
-      name: 'PBKDF2',
-      salt: enc.encode('lovechat_e2ee_salt_2026'),
-      iterations: 100000,
-      hash: 'SHA-256',
-    },
-    keyMaterial,
+    hash,
     { name: 'AES-GCM', length: 256 },
     false,
     ['encrypt', 'decrypt']

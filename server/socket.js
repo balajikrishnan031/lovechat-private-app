@@ -4,36 +4,35 @@ const onlineUsers = new Map(); // userId -> Set of socketIds
 
 const setupSocketHandlers = (io) => {
   io.on('connection', (socket) => {
-    let currentUserId = null;
-
     // Register user socket
     socket.on('user_connected', async (userId) => {
       if (!userId) return;
-      currentUserId = parseInt(userId);
-      socket.join(`user_${currentUserId}`);
+      socket.userId = parseInt(userId);
+      socket.join(`user_${socket.userId}`);
 
-      if (!onlineUsers.has(currentUserId)) {
-        onlineUsers.set(currentUserId, new Set());
+      if (!onlineUsers.has(socket.userId)) {
+        onlineUsers.set(socket.userId, new Set());
       }
-      onlineUsers.get(currentUserId).add(socket.id);
+      onlineUsers.get(socket.userId).add(socket.id);
 
       // Update online status in DB
-      await dbRun('UPDATE users SET online = 1 WHERE id = ?', [currentUserId]);
-      io.emit('user_status_changed', { userId: currentUserId, online: true });
+      await dbRun('UPDATE users SET online = 1 WHERE id = ?', [socket.userId]);
+      io.emit('user_status_changed', { userId: socket.userId, online: true });
     });
 
     // Get or Create Direct Chat
     socket.on('get_or_create_direct_chat', async ({ targetUserId }, callback) => {
       try {
-        if (!currentUserId || !targetUserId) return callback({ error: 'Invalid user IDs' });
+        const userId = socket.userId;
+        if (!userId || !targetUserId) return callback && callback({ error: 'Invalid user IDs' });
 
-        // Find existing direct chat between currentUserId and targetUserId
+        // Find existing direct chat between userId and targetUserId
         const existingChat = await dbGet(
           `SELECT c.id FROM chats c
            JOIN chat_members cm1 ON c.id = cm1.chat_id
            JOIN chat_members cm2 ON c.id = cm2.chat_id
            WHERE c.type = 'direct' AND cm1.user_id = ? AND cm2.user_id = ?`,
-          [currentUserId, targetUserId]
+          [userId, targetUserId]
         );
 
         let chatId;
@@ -43,7 +42,7 @@ const setupSocketHandlers = (io) => {
           // Create new chat
           const result = await dbRun(`INSERT INTO chats (type) VALUES ('direct')`);
           chatId = result.lastID;
-          await dbRun(`INSERT INTO chat_members (chat_id, user_id) VALUES (?, ?)`, [chatId, currentUserId]);
+          await dbRun(`INSERT INTO chat_members (chat_id, user_id) VALUES (?, ?)`, [chatId, userId]);
           await dbRun(`INSERT INTO chat_members (chat_id, user_id) VALUES (?, ?)`, [chatId, targetUserId]);
         }
 
@@ -58,8 +57,9 @@ const setupSocketHandlers = (io) => {
     // Create Group Chat
     socket.on('create_group_chat', async ({ name, memberIds }, callback) => {
       try {
-        if (!currentUserId || !name || !memberIds || memberIds.length === 0) {
-          return callback({ error: 'Group name and members required' });
+        const userId = socket.userId;
+        if (!userId || !name || !memberIds || memberIds.length === 0) {
+          return callback && callback({ error: 'Group name and members required' });
         }
 
         const avatar = `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(name)}`;
@@ -67,11 +67,11 @@ const setupSocketHandlers = (io) => {
         const chatId = result.lastID;
 
         // Add creator as admin
-        await dbRun(`INSERT INTO chat_members (chat_id, user_id, role) VALUES (?, ?, 'admin')`, [chatId, currentUserId]);
+        await dbRun(`INSERT INTO chat_members (chat_id, user_id, role) VALUES (?, ?, 'admin')`, [chatId, userId]);
 
         // Add members
         for (const mId of memberIds) {
-          if (mId !== currentUserId) {
+          if (mId !== userId) {
             await dbRun(`INSERT INTO chat_members (chat_id, user_id, role) VALUES (?, ?, 'member')`, [chatId, mId]);
             // Notify members
             io.to(`user_${mId}`).emit('added_to_group', { chatId, name });
@@ -89,7 +89,8 @@ const setupSocketHandlers = (io) => {
     // Fetch Recent Chats for Current User
     socket.on('fetch_user_chats', async (callback) => {
       try {
-        if (!currentUserId) return callback({ error: 'User not authenticated' });
+        const userId = socket.userId;
+        if (!userId) return callback && callback({ error: 'User not authenticated' });
 
         const chats = await dbAll(
           `SELECT c.id, c.type, c.name, c.avatar, c.created_at,
@@ -100,18 +101,18 @@ const setupSocketHandlers = (io) => {
            JOIN chat_members cm ON c.id = cm.chat_id
            WHERE cm.user_id = ?
            ORDER BY last_message_time DESC, c.created_at DESC`,
-          [currentUserId]
+          [userId]
         );
 
         // Populate member details for direct chats
         for (let chat of chats) {
           if (chat.type === 'direct') {
             const partner = await dbGet(
-              `SELECT u.id, u.username, u.avatar, u.online, u.last_seen, u.college
+              `SELECT u.id, u.username, u.avatar, u.online, u.last_seen
                FROM users u
                JOIN chat_members cm ON u.id = cm.user_id
                WHERE cm.chat_id = ? AND u.id != ?`,
-              [chat.id, currentUserId]
+              [chat.id, userId]
             );
             chat.partner = partner;
             chat.displayName = partner ? partner.username : 'Unknown User';
@@ -152,23 +153,24 @@ const setupSocketHandlers = (io) => {
     // Send Message
     socket.on('send_message', async ({ chatId, content, type = 'text', fileUrl = null, fileName = null, fileSize = null, replyToId = null }) => {
       try {
-        if (!currentUserId || !chatId) return;
+        const userId = socket.userId;
+        if (!userId || !chatId) return;
 
         const result = await dbRun(
           `INSERT INTO messages (chat_id, sender_id, content, type, file_url, file_name, file_size, reply_to_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [chatId, currentUserId, content, type, fileUrl, fileName, fileSize, replyToId]
+          [chatId, userId, content, type, fileUrl, fileName, fileSize, replyToId]
         );
 
         const messageId = result.lastID;
-        const sender = await dbGet('SELECT username, avatar FROM users WHERE id = ?', [currentUserId]);
+        const sender = await dbGet('SELECT username, avatar FROM users WHERE id = ?', [userId]);
 
         const fullMessage = {
           id: messageId,
           chat_id: chatId,
-          sender_id: currentUserId,
-          sender_name: sender.username,
-          sender_avatar: sender.avatar,
+          sender_id: userId,
+          sender_name: sender ? sender.username : 'User',
+          sender_avatar: sender ? sender.avatar : null,
           content,
           type,
           file_url: fileUrl,
